@@ -1,4 +1,5 @@
 import os
+import re
 import urllib.parse
 from datetime import datetime, timedelta
 
@@ -30,15 +31,9 @@ WHATSAPP_CHANNEL_URL = get_secret("WHATSAPP_CHANNEL_URL", "")
 ML_API = "https://api.mercadolibre.com"
 NOTA_MINIMA = 4.5
 
-CATEGORIAS_BUSCA = {
-    "Eletrônicos": {"nome": "Eletrônicos, Áudio e Vídeo", "id_fallback": "MLB1000", "palavra_chave": None},
-    "Informática": {"nome": "Informática", "id_fallback": "MLB1648", "palavra_chave": None},
-    "Periféricos": {"nome": "Informática", "id_fallback": "MLB1648", "palavra_chave": "periféricos"},
-    "Consoles": {"nome": "Games", "id_fallback": "MLB1144", "palavra_chave": "console videogame"},
-}
 
 # ----------------------------------------------------------------------------
-# OAuth Mercado Livre (necessário para /search e /reviews autenticados)
+# OAuth Mercado Livre (necessário para /items e /reviews autenticados)
 # ----------------------------------------------------------------------------
 def montar_url_autorizacao():
     params = {"response_type": "code", "client_id": CLIENT_ID, "redirect_uri": REDIRECT_URI}
@@ -116,38 +111,41 @@ def obter_token_valido():
     return token["access_token"]
 
 # ----------------------------------------------------------------------------
-# Categorias (resolução dinâmica com fallback)
+# Extração de IDs e busca de produtos/avaliações
 # ----------------------------------------------------------------------------
-@st.cache_data(ttl=86400, show_spinner=False)
-def buscar_categorias_site():
-    resp = requests.get(f"{ML_API}/sites/MLB/categories", timeout=15)
-    resp.raise_for_status()
-    return resp.json()
+def extrair_ids(texto):
+    """Extrai IDs de item (ex.: MLB1234567890) de uma lista de links colados."""
+    brutos = re.findall(r"MLB-?\d+", texto or "", flags=re.IGNORECASE)
+    vistos, ids = set(), []
+    for bruto in brutos:
+        item_id = bruto.upper().replace("-", "")
+        if item_id not in vistos:
+            vistos.add(item_id)
+            ids.append(item_id)
+    return ids
 
 
-def resolver_id_categoria(nome_categoria, id_fallback):
-    try:
-        for c in buscar_categorias_site():
-            if nome_categoria.lower() in c["name"].lower():
-                return c["id"]
-    except Exception:
-        pass
-    return id_fallback
-
-# ----------------------------------------------------------------------------
-# Busca de produtos e avaliações
-# ----------------------------------------------------------------------------
-@st.cache_data(ttl=600, show_spinner=False)
-def buscar_produtos(categoria_id, palavra_chave, limite, token):
+@st.cache_data(ttl=300, show_spinner=False)
+def buscar_itens(ids_lote, token):
     headers = {"Authorization": f"Bearer {token}"}
-    params = {"category": categoria_id, "limit": limite}
-    if palavra_chave:
-        params["q"] = palavra_chave
-    resp = requests.get(f"{ML_API}/sites/MLB/search", headers=headers, params=params, timeout=15)
+    resp = requests.get(f"{ML_API}/items", headers=headers, params={"ids": ",".join(ids_lote)}, timeout=15)
     if resp.status_code in (401, 403):
         raise PermissionError("Token inválido, expirado ou sem permissão.")
     resp.raise_for_status()
-    return resp.json().get("results", [])
+    produtos = []
+    for entrada in resp.json():
+        if entrada.get("code", 200) != 200:
+            continue
+        corpo = entrada.get("body", entrada)
+        produtos.append({
+            "id": corpo.get("id"),
+            "title": corpo.get("title"),
+            "price": corpo.get("price"),
+            "original_price": corpo.get("original_price"),
+            "permalink": corpo.get("permalink"),
+            "thumbnail": (corpo.get("thumbnail") or "").replace("http://", "https://"),
+        })
+    return produtos
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -220,13 +218,14 @@ with st.sidebar:
     if WHATSAPP_CHANNEL_URL:
         st.link_button("📢 Abrir meu canal", WHATSAPP_CHANNEL_URL)
 
-    categorias_selecionadas = st.multiselect(
-        "Categorias", list(CATEGORIAS_BUSCA.keys()), default=list(CATEGORIAS_BUSCA.keys())
+    texto_links = st.text_area(
+        "Cole aqui os links dos produtos (um por linha)",
+        height=160,
+        placeholder="https://produto.mercadolivre.com.br/MLB-1234567890-...",
     )
-    limite_por_categoria = st.slider("Produtos por categoria", 5, 30, 10)
 
-    if st.button("🔄 Atualizar busca"):
-        buscar_produtos.clear()
+    if st.button("🔄 Atualizar avaliações"):
+        buscar_itens.clear()
         buscar_avaliacao.clear()
         st.rerun()
 
@@ -234,67 +233,64 @@ if not token_atual:
     st.info("Conecte sua conta do Mercado Livre na barra lateral para começar a buscar as ofertas.")
     st.stop()
 
-if not categorias_selecionadas:
-    st.warning("Selecione ao menos uma categoria na barra lateral.")
+ids_colados = extrair_ids(texto_links)
+if not ids_colados:
+    st.info("Cole ao menos um link de produto do Mercado Livre na barra lateral (ex.: https://produto.mercadolivre.com.br/MLB-...).")
     st.stop()
 
-ids_exibidos = set()
+produtos_aprovados = []
+produtos_reprovados = 0
+with st.spinner("Buscando produtos e avaliações..."):
+    for inicio in range(0, len(ids_colados), 20):
+        lote = tuple(ids_colados[inicio:inicio + 20])
+        try:
+            itens = buscar_itens(lote, token_atual)
+        except PermissionError:
+            st.error("Sessão expirada. Reconecte sua conta na barra lateral.")
+            st.session_state.ml_token = None
+            st.stop()
+        except Exception as e:
+            st.error(f"Erro ao buscar os produtos: {e}")
+            itens = []
 
-for nome_exibicao in categorias_selecionadas:
-    config = CATEGORIAS_BUSCA[nome_exibicao]
-    categoria_id = resolver_id_categoria(config["nome"], config["id_fallback"])
-
-    st.subheader(f"📦 {nome_exibicao}")
-
-    try:
-        produtos = buscar_produtos(categoria_id, config["palavra_chave"], limite_por_categoria, token_atual)
-    except PermissionError:
-        st.error("Sessão expirada. Reconecte sua conta na barra lateral.")
-        st.session_state.ml_token = None
-        st.stop()
-    except Exception as e:
-        st.error(f"Erro ao buscar produtos: {e}")
-        continue
-
-    produtos_aprovados = []
-    with st.spinner(f"Avaliando produtos de {nome_exibicao}..."):
-        for produto in produtos:
-            if produto["id"] in ids_exibidos:
-                continue
+        for produto in itens:
             nota = buscar_avaliacao(produto["id"], token_atual)
             if nota is not None and nota >= NOTA_MINIMA:
-                ids_exibidos.add(produto["id"])
                 produtos_aprovados.append((produto, nota))
+            else:
+                produtos_reprovados += 1
 
-    if not produtos_aprovados:
-        st.caption("Nenhum produto com avaliação ≥ 4.5 encontrado nesta categoria agora.")
-        continue
+st.caption(f"{len(produtos_aprovados)} produto(s) aprovado(s) · {produtos_reprovados} abaixo de {NOTA_MINIMA} ou sem nota")
 
-    colunas = st.columns(2)
-    for indice, (produto, nota) in enumerate(produtos_aprovados):
-        link_afiliado = montar_link_afiliado(produto["permalink"], AFFILIATE_TAG)
-        imagem = produto.get("thumbnail", "").replace("http://", "https://")
+if not produtos_aprovados:
+    st.warning("Nenhum produto colado tem avaliação ≥ 4.5 (ou os links não foram reconhecidos).")
+    st.stop()
 
-        with colunas[indice % 2]:
-            with st.container(border=True):
-                if imagem:
-                    st.image(imagem, use_container_width=True)
-                else:
-                    st.caption("Sem imagem disponível")
-                st.markdown(f"**{produto['title']}**")
+colunas = st.columns(2)
+for indice, (produto, nota) in enumerate(produtos_aprovados):
+    link_afiliado = montar_link_afiliado(produto["permalink"], AFFILIATE_TAG)
+    imagem = produto.get("thumbnail", "").replace("http://", "https://")
 
-                if produto.get("original_price") and produto["original_price"] > produto["price"]:
-                    desconto = round((1 - produto["price"] / produto["original_price"]) * 100)
-                    st.markdown(
-                        f"~~{formatar_preco(produto['original_price'])}~~ "
-                        f"**{formatar_preco(produto['price'])}** 🔻{desconto}%"
-                    )
-                else:
-                    st.markdown(f"**{formatar_preco(produto['price'])}**")
+    with colunas[indice % 2]:
+        with st.container(border=True):
+            if imagem:
+                st.image(imagem, use_container_width=True)
+            else:
+                st.caption("Sem imagem disponível")
+            st.markdown(f"**{produto['title']}**")
 
-                st.markdown(f"⭐ {nota:.1f} / 5.0")
-                mensagem = montar_mensagem(produto, link_afiliado, nota)
-                st.code(mensagem, language=None)
-                st.link_button("📲 Compartilhar no WhatsApp", montar_link_whatsapp(mensagem), use_container_width=True)
-                if imagem:
-                    st.markdown(f"[🖼️ Abrir imagem para salvar]({imagem})")
+            if produto.get("original_price") and produto["original_price"] > produto["price"]:
+                desconto = round((1 - produto["price"] / produto["original_price"]) * 100)
+                st.markdown(
+                    f"~~{formatar_preco(produto['original_price'])}~~ "
+                    f"**{formatar_preco(produto['price'])}** 🔻{desconto}%"
+                )
+            else:
+                st.markdown(f"**{formatar_preco(produto['price'])}**")
+
+            st.markdown(f"⭐ {nota:.1f} / 5.0")
+            mensagem = montar_mensagem(produto, link_afiliado, nota)
+            st.code(mensagem, language=None)
+            st.link_button("📲 Compartilhar no WhatsApp", montar_link_whatsapp(mensagem), use_container_width=True)
+            if imagem:
+                st.markdown(f"[🖼️ Abrir imagem para salvar]({imagem})")
