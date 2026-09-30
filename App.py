@@ -177,18 +177,44 @@ def extrair_ids(texto):
     return ids
 
 
+def _detalhe_erro(resp):
+    try:
+        corpo = resp.json()
+        return corpo.get("message") or corpo.get("error") or str(corpo)
+    except Exception:
+        return resp.text[:200]
+
+
+def _buscar_item_unico(item_id, token):
+    """Busca um item pelo endpoint /items/{id}. Tenta com token; se a
+    Mercado Livre recusar, tenta de novo sem cabeçalho de autenticação
+    (dado público de item às vezes não exige login)."""
+    tentativas = []
+    if token:
+        tentativas.append({"Authorization": f"Bearer {token}"})
+    tentativas.append({})  # sem token, como segunda tentativa
+
+    ultimo_erro = None
+    for headers in tentativas:
+        resp = requests.get(f"{ML_API}/items/{item_id}", headers=headers, timeout=15)
+        if resp.status_code == 200:
+            return resp.json(), None
+        if resp.status_code in (401, 403):
+            ultimo_erro = f"{resp.status_code}: {_detalhe_erro(resp)}"
+            continue
+        resp.raise_for_status()
+    return None, ultimo_erro
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def buscar_itens(ids_lote, token):
-    headers = {"Authorization": f"Bearer {token}"}
-    resp = requests.get(f"{ML_API}/items", headers=headers, params={"ids": ",".join(ids_lote)}, timeout=15)
-    if resp.status_code in (401, 403):
-        raise PermissionError("Token inválido, expirado ou sem permissão.")
-    resp.raise_for_status()
     produtos = []
-    for entrada in resp.json():
-        if entrada.get("code", 200) != 200:
+    erros = []
+    for item_id in ids_lote:
+        corpo, erro = _buscar_item_unico(item_id, token)
+        if corpo is None:
+            erros.append(f"{item_id}: {erro}")
             continue
-        corpo = entrada.get("body", entrada)
         produtos.append({
             "id": corpo.get("id"),
             "title": corpo.get("title"),
@@ -197,7 +223,9 @@ def buscar_itens(ids_lote, token):
             "permalink": corpo.get("permalink"),
             "thumbnail": (corpo.get("thumbnail") or "").replace("http://", "https://"),
         })
-    return produtos
+    if erros and not produtos:
+        raise PermissionError(" | ".join(erros))
+    return produtos, erros
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -308,14 +336,16 @@ with st.spinner("Buscando produtos e avaliações..."):
     for inicio in range(0, len(ids_colados), 20):
         lote = tuple(ids_colados[inicio:inicio + 20])
         try:
-            itens = buscar_itens(lote, token_atual)
-        except PermissionError:
-            st.error("Sessão expirada. Reconecte sua conta na barra lateral.")
-            st.session_state.ml_token = None
+            itens, erros_lote = buscar_itens(lote, token_atual)
+        except PermissionError as e:
+            st.error(f"A Mercado Livre recusou a consulta: {e}")
             st.stop()
         except Exception as e:
             st.error(f"Erro ao buscar os produtos: {e}")
-            itens = []
+            itens, erros_lote = [], []
+
+        for erro in erros_lote:
+            st.caption(f"⚠️ Não foi possível validar: {erro}")
 
         for produto in itens:
             nota = buscar_avaliacao(produto["id"], token_atual)
@@ -360,4 +390,3 @@ for indice, (produto, nota) in enumerate(produtos_aprovados):
             st.link_button("📲 Compartilhar no WhatsApp", montar_link_whatsapp(mensagem), use_container_width=True)
             if imagem:
                 st.markdown(f"[🖼️ Abrir imagem para salvar]({imagem})")
-    
