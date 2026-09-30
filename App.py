@@ -16,7 +16,19 @@ st.markdown("""
 .stApp { background-color: #EBEBEB; }
 h1 { color: #333333 !important; }
 [data-testid="stSidebar"] { background-color: #FFFFFF; border-right: 1px solid #E0E0E0; }
-[data-testid="stSidebar"] h2 { color: #333333; }
+[data-testid="stSidebar"] * { color: #1A1A1A !important; }
+[data-testid="stSidebar"] h2 { color: #1A1A1A !important; font-weight: 700; }
+[data-testid="stSidebar"] label, [data-testid="stSidebar"] p { color: #1A1A1A !important; }
+[data-testid="stSidebar"] textarea, [data-testid="stSidebar"] input {
+    background-color: #F5F5F5 !important;
+    color: #1A1A1A !important;
+    border: 1px solid #B0B0B0 !important;
+}
+[data-testid="stSidebar"] textarea::placeholder { color: #757575 !important; opacity: 1; }
+[data-testid="stSidebar"] [data-testid="stAlert"] p { color: #1A1A1A !important; }
+[data-testid="stSidebar"] .stButton>button,
+[data-testid="stSidebar"] .stLinkButton>a,
+[data-testid="stSidebar"] .stFormSubmitButton>button { color: #FFFFFF !important; }
 div[data-testid="stVerticalBlockBorderWrapper"] {
     background-color: #FFFFFF;
     border-radius: 8px;
@@ -263,10 +275,11 @@ with st.sidebar:
 
     with st.form("form_busca"):
         texto_links = st.text_area(
-            "Cole aqui os links dos produtos (um por linha)",
+            "Cole os links dos produtos (pode colar vários de uma vez, juntos ou um por linha)",
             value=st.session_state.links_salvos,
             height=160,
-            placeholder="https://produto.mercadolivre.com.br/MLB-1234567890-...",
+            placeholder="Cole aqui um ou vários links do Mercado Livre, ex.: "
+                        "https://produto.mercadolivre.com.br/MLB-1234567890-...",
         )
         enviado = st.form_submit_button("🔎 Gerar ofertas", use_container_width=True)
 
