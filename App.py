@@ -11,6 +11,46 @@ load_dotenv()
 
 st.set_page_config(page_title="Ofertas ML - Afiliados", page_icon="🛒", layout="wide")
 
+st.markdown("""
+<style>
+.stApp { background-color: #EBEBEB; }
+h1 { color: #333333 !important; }
+[data-testid="stSidebar"] { background-color: #FFFFFF; border-right: 1px solid #E0E0E0; }
+[data-testid="stSidebar"] h2 { color: #333333; }
+div[data-testid="stVerticalBlockBorderWrapper"] {
+    background-color: #FFFFFF;
+    border-radius: 8px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+    padding: 4px;
+}
+.stButton>button, .stLinkButton>a, .stFormSubmitButton>button {
+    background-color: #3483FA !important;
+    color: #FFFFFF !important;
+    border: none !important;
+    border-radius: 6px !important;
+    font-weight: 600 !important;
+}
+.stButton>button:hover, .stLinkButton>a:hover, .stFormSubmitButton>button:hover {
+    background-color: #2968C8 !important;
+}
+.faixa-ml {
+    background-color: #FFE600;
+    padding: 10px 16px;
+    border-radius: 6px;
+    margin-bottom: 16px;
+    font-weight: 600;
+    color: #333333;
+}
+.preco-atual { color: #333333; font-size: 1.4rem; font-weight: 700; }
+.preco-original { color: #999999; text-decoration: line-through; font-size: 0.95rem; }
+.badge-desconto {
+    background-color: #00A650; color: #FFFFFF; font-weight: 700;
+    padding: 2px 8px; border-radius: 4px; font-size: 0.85rem; margin-left: 6px;
+}
+.nota-produto { color: #666666; font-size: 0.95rem; }
+</style>
+""", unsafe_allow_html=True)
+
 # ----------------------------------------------------------------------------
 # Configuração / Secrets
 # ----------------------------------------------------------------------------
@@ -33,7 +73,7 @@ NOTA_MINIMA = 4.5
 
 
 # ----------------------------------------------------------------------------
-# OAuth Mercado Livre (necessário para /items e /reviews autenticados)
+# OAuth Mercado Livre (necessário para /search e /reviews autenticados)
 # ----------------------------------------------------------------------------
 def montar_url_autorizacao():
     params = {"response_type": "code", "client_id": CLIENT_ID, "redirect_uri": REDIRECT_URI}
@@ -111,7 +151,7 @@ def obter_token_valido():
     return token["access_token"]
 
 # ----------------------------------------------------------------------------
-# Extração de IDs e busca de produtos/avaliações
+# Categorias (resolução dinâmica com fallback)
 # ----------------------------------------------------------------------------
 def extrair_ids(texto):
     """Extrai IDs de item (ex.: MLB1234567890) de uma lista de links colados."""
@@ -199,7 +239,7 @@ def montar_link_whatsapp(mensagem):
 processar_login()
 token_atual = obter_token_valido()
 
-st.title("🛒 Painel de Ofertas de Afiliado — Mercado Livre")
+st.markdown('<div class="faixa-ml">🛒 Painel de Ofertas de Afiliado — Mercado Livre</div>', unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("⚙️ Configurações")
@@ -218,13 +258,24 @@ with st.sidebar:
     if WHATSAPP_CHANNEL_URL:
         st.link_button("📢 Abrir meu canal", WHATSAPP_CHANNEL_URL)
 
-    texto_links = st.text_area(
-        "Cole aqui os links dos produtos (um por linha)",
-        height=160,
-        placeholder="https://produto.mercadolivre.com.br/MLB-1234567890-...",
-    )
+    if "links_salvos" not in st.session_state:
+        st.session_state.links_salvos = ""
 
-    if st.button("🔄 Atualizar avaliações"):
+    with st.form("form_busca"):
+        texto_links = st.text_area(
+            "Cole aqui os links dos produtos (um por linha)",
+            value=st.session_state.links_salvos,
+            height=160,
+            placeholder="https://produto.mercadolivre.com.br/MLB-1234567890-...",
+        )
+        enviado = st.form_submit_button("🔎 Gerar ofertas", use_container_width=True)
+
+    if enviado:
+        st.session_state.links_salvos = texto_links
+        buscar_itens.clear()
+        buscar_avaliacao.clear()
+
+    if st.button("🔄 Atualizar avaliações", use_container_width=True):
         buscar_itens.clear()
         buscar_avaliacao.clear()
         st.rerun()
@@ -233,7 +284,7 @@ if not token_atual:
     st.info("Conecte sua conta do Mercado Livre na barra lateral para começar a buscar as ofertas.")
     st.stop()
 
-ids_colados = extrair_ids(texto_links)
+ids_colados = extrair_ids(st.session_state.links_salvos)
 if not ids_colados:
     st.info("Cole ao menos um link de produto do Mercado Livre na barra lateral (ex.: https://produto.mercadolivre.com.br/MLB-...).")
     st.stop()
@@ -282,15 +333,18 @@ for indice, (produto, nota) in enumerate(produtos_aprovados):
             if produto.get("original_price") and produto["original_price"] > produto["price"]:
                 desconto = round((1 - produto["price"] / produto["original_price"]) * 100)
                 st.markdown(
-                    f"~~{formatar_preco(produto['original_price'])}~~ "
-                    f"**{formatar_preco(produto['price'])}** 🔻{desconto}%"
+                    f'<span class="preco-original">{formatar_preco(produto["original_price"])}</span> '
+                    f'<span class="preco-atual">{formatar_preco(produto["price"])}</span>'
+                    f'<span class="badge-desconto">{desconto}% OFF</span>',
+                    unsafe_allow_html=True,
                 )
             else:
-                st.markdown(f"**{formatar_preco(produto['price'])}**")
+                st.markdown(f'<span class="preco-atual">{formatar_preco(produto["price"])}</span>', unsafe_allow_html=True)
 
-            st.markdown(f"⭐ {nota:.1f} / 5.0")
+            st.markdown(f'<span class="nota-produto">⭐ {nota:.1f} / 5.0</span>', unsafe_allow_html=True)
             mensagem = montar_mensagem(produto, link_afiliado, nota)
             st.code(mensagem, language=None)
             st.link_button("📲 Compartilhar no WhatsApp", montar_link_whatsapp(mensagem), use_container_width=True)
             if imagem:
                 st.markdown(f"[🖼️ Abrir imagem para salvar]({imagem})")
+    
